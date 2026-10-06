@@ -8,6 +8,7 @@ from upstash_redis import Redis
 from datetime import datetime, timedelta
 import json
 import os
+import re
 
 API_KEY = os.environ.get("API_KEY", "")
 
@@ -24,6 +25,26 @@ def check_auth(headers) -> bool:
     return auth == f"Bearer {API_KEY}"
 
 
+NUM_RE = re.compile(r"^\s*([-+]?\d[\d\s\u00a0\u202f]*(?:[.,]\d+)?)\s*[^\d]*$")
+
+
+def to_number(v: str):
+    """Parse a number from iOS Shortcuts text.
+    Handles Norwegian/European formatting ("45,3"), thousand separators
+    ("8 432") and trailing units ("45 ms", "62 count/min", "8 432 skritt")."""
+    m = NUM_RE.match(v)
+    if not m:
+        return None
+    s = m.group(1)
+    for sep in (" ", "\u00a0", "\u202f"):
+        s = s.replace(sep, "")
+    s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
 def parse_values(raw: str) -> list:
     """Parse newline-separated values from iOS Shortcuts."""
     decoded = unquote(raw).replace("\r\n", "\n").replace("\r", "\n")
@@ -31,10 +52,8 @@ def parse_values(raw: str) -> list:
     for v in decoded.split("\n"):
         v = v.strip()
         if v:
-            try:
-                values.append(float(v))
-            except ValueError:
-                values.append(v)
+            n = to_number(v)
+            values.append(n if n is not None else v)
     return values
 
 
@@ -81,13 +100,14 @@ def compute_sleep_stats(values: list) -> dict:
     stages = {"REM": 0, "Core": 0, "Deep": 0, "Awake": 0}
     for v in values:
         if isinstance(v, str):
-            if "REM" in v:
+            s = v.lower()
+            if "rem" in s:
                 stages["REM"] += 1
-            elif "Core" in v or "Light" in v:
+            elif "core" in s or "light" in s or "kjerne" in s or "lett" in s:
                 stages["Core"] += 1
-            elif "Deep" in v:
+            elif "deep" in s or "dyp" in s:
                 stages["Deep"] += 1
-            elif "Awake" in v or "Wake" in v:
+            elif "awake" in s or "wake" in s or "våken" in s or "vaken" in s:
                 stages["Awake"] += 1
 
     total = sum(stages.values())
@@ -165,6 +185,9 @@ class handler(BaseHTTPRequestHandler):
         health_data = json.loads(existing) if existing else {}
 
         for key, values in form_data.items():
+            key = key.strip()
+            if not key:
+                continue
             raw = values[0] if values else ""
             parsed = parse_values(raw)
             health_data[key] = compute_stats(parsed, key)
